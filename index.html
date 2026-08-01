@@ -4,49 +4,93 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MisOpos · Bibliotecas del Estado</title>
+
+    <!-- Tipografía Poppins de Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
     <style>
       :root {
-        --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-        --color-background-primary: #FFFFFF;
-        --color-background-secondary: #FAFAF7;
-        --color-background-tertiary: #F4F3EE;
-        --color-text-primary: #1A1A1A;
-        --color-text-secondary: #4B4B4B;
-        --color-text-tertiary: #8A8A85;
-        --color-border-tertiary: #E5E5E0;
-        --border-radius-md: 8px;
-        --border-radius-lg: 12px;
+        /* Tipografía */
+        --font-sans: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+
+        /* Paleta Acttiv */
+        --color-bg: #FFFFFF;
+        --color-bg-soft: #FAFAFA;
+        --color-bg-hover: #F5F5F5;
+        --color-text: #1A1A1A;
+        --color-text-soft: #4B4B4B;
+        --color-text-mute: #8A8A85;
+        --color-border: #E8E8E8;
+        --color-border-soft: #F0F0F0;
+
+        /* Naranja Acttiv (resaltados) */
+        --color-accent: #F26522;
+        --color-accent-soft: #FEF0E7;
+        --color-accent-border: #FBCFB2;
+        --color-accent-hover: #D9541A;
+
+        /* Estados */
+        --color-success: #0F6E56;
+        --color-success-soft: #E1F5EE;
+        --color-danger: #B91C1C;
+        --color-danger-soft: #FEE2E2;
+        --color-warning: #854F0B;
+        --color-warning-soft: #FFF8E5;
+
+        /* Radios */
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
       }
+
       html, body, #root { height: 100%; }
       body {
         margin: 0;
         font-family: var(--font-sans);
-        background: var(--color-background-tertiary);
-        color: var(--color-text-primary);
+        font-weight: 400;
+        background: var(--color-bg);
+        color: var(--color-text);
         -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
-      button, input {
+
+      button, input, textarea {
         font-family: inherit;
         outline: none;
       }
       button {
-        border: 1px solid var(--color-border-tertiary);
-        background: var(--color-background-primary);
-        color: var(--color-text-primary);
-        border-radius: var(--border-radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-bg);
+        color: var(--color-text);
+        border-radius: var(--radius-md);
         cursor: pointer;
-        transition: all .12s ease;
+        transition: all .15s ease;
+        font-weight: 500;
       }
-      button:hover:not(:disabled) { background: var(--color-background-secondary); }
+      button:hover:not(:disabled) {
+        background: var(--color-bg-hover);
+      }
       button:disabled { opacity: .4; cursor: default; }
       input {
-        border: 1px solid var(--color-border-tertiary);
-        background: var(--color-background-primary);
-        color: var(--color-text-primary);
-        border-radius: var(--border-radius-md);
-        padding: 7px 10px;
+        border: 1px solid var(--color-border);
+        background: var(--color-bg);
+        color: var(--color-text);
+        border-radius: var(--radius-md);
+        padding: 8px 12px;
+        font-weight: 400;
       }
-      input:focus { border-color: #0F6E56; }
+      input:focus { border-color: var(--color-accent); }
+
+      /* Scrollbar sutil */
+      *::-webkit-scrollbar { width: 8px; height: 8px; }
+      *::-webkit-scrollbar-track { background: transparent; }
+      *::-webkit-scrollbar-thumb {
+        background: #DDDDD8;
+        border-radius: 4px;
+      }
+      *::-webkit-scrollbar-thumb:hover { background: #C0C0BA; }
     </style>
   </head>
   <body>
