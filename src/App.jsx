@@ -391,13 +391,15 @@ const secondaryBtn = {
 // MÓDULO: EXAMEN → TEST
 // ═══════════════════════════════════════════════════════════════
 
-const PROMPT_EXAMEN = `Eres un experto en oposiciones de la Escala de Auxiliares de Archivos, Bibliotecas y Museos de la Comunidad de Madrid.
-Analiza el examen y genera EXACTAMENTE 10 preguntas tipo test en español basadas en el contenido del examen.
-REGLAS: Siempre 4 opciones, una sola correcta, distractores plausibles. Si hay CDU, MARC21, ordenacion o catalogacion: pregunta especificamente sobre esos contenidos.
-La explicacion de cada pregunta debe ser breve (maximo 2 frases).
-Devuelve UNICAMENTE un array JSON sin backticks ni markdown:
-[{"question":"...","type":"CDU|MARC21|Ordenacion|Servicios|Legislacion","options":["A","B","C","D"],"correct":0,"explanation":"..."}]
-El campo correct es el indice 0-3 de la opcion correcta.`;
+const PROMPT_EXAMEN = `Eres un experto en oposiciones de Auxiliares de Archivos, Bibliotecas y Museos de la Comunidad de Madrid.
+Analiza el examen y genera EXACTAMENTE 5 preguntas tipo test en español.
+REGLAS ESTRICTAS:
+- 4 opciones por pregunta, maximo 8 palabras cada opcion
+- 1 sola correcta
+- Si hay CDU, MARC21 o catalogacion: pregunta sobre eso
+- explanation: maximo 1 frase corta
+- Devuelve SOLO el array JSON, sin texto antes ni despues, sin backticks:
+[{"question":"...","type":"CDU|MARC21|Catalogacion|Servicios","options":["A","B","C","D"],"correct":0,"explanation":"..."}]`;
 
 function ExamenATest() {
   const [phase, setPhase] = useState("idle");
@@ -410,6 +412,32 @@ function ExamenATest() {
   const [showExp, setShowExp] = useState({});
   const [error, setError] = useState("");
   const fileRef = useRef();
+
+  // ── Repositorio de examenes (localStorage) ──────────────────────────────
+  const [repo, setRepo] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("examRepo") || "[]"); } catch { return []; }
+  });
+
+  function saveToRepo(name, text) {
+    const id = Date.now().toString();
+    const entry = { id, name, text, date: new Date().toLocaleDateString("es-ES") };
+    const updated = [entry, ...repo].slice(0, 20); // max 20 examenes
+    setRepo(updated);
+    try { localStorage.setItem("examRepo", JSON.stringify(updated)); } catch {}
+  }
+
+  function deleteFromRepo(id) {
+    const updated = repo.filter(e => e.id !== id);
+    setRepo(updated);
+    try { localStorage.setItem("examRepo", JSON.stringify(updated)); } catch {}
+  }
+
+  function loadFromRepo(entry) {
+    setFileName(entry.name);
+    setFileData({ type: "text", data: entry.text });
+    setError("");
+    setPhase("ready");
+  }
 
   // Extrae texto de un PDF usando PDF.js via CDN
   async function extractPdfText(file) {
@@ -436,8 +464,8 @@ function ExamenATest() {
 
   const loadFile = useCallback(async (file) => {
     if (!file) return;
-    if (file.type !== "application/pdf" && !file.name.endsWith(".txt")) {
-      setError("Por favor sube un PDF o un archivo de texto (.txt) con el examen.");
+    if (file.type !== "application/pdf" && !file.name.endsWith(".txt") && !file.name.endsWith(".md")) {
+      setError("Por favor sube un PDF, un archivo de texto (.txt) o un markdown (.md) con el examen.");
       return;
     }
     setError("");
@@ -447,16 +475,17 @@ function ExamenATest() {
       try {
         const text = await extractPdfText(file);
         setFileData({ type: "text", data: text });
+        saveToRepo(file.name, text);
         setPhase("ready");
       } catch {
         // Fallback si PDF.js falla
         const r = new FileReader();
-        r.onload = (e) => { setFileData({ type: "text", data: e.target.result }); setPhase("ready"); };
+        r.onload = (e) => { setFileData({ type: "text", data: e.target.result }); saveToRepo(file.name, e.target.result); setPhase("ready"); };
         r.readAsText(file);
       }
     } else {
       const reader = new FileReader();
-      reader.onload = (e) => { setFileData({ type: "text", data: e.target.result }); setPhase("ready"); };
+      reader.onload = (e) => { setFileData({ type: "text", data: e.target.result }); saveToRepo(file.name, e.target.result); setPhase("ready"); };
       reader.readAsText(file);
     }
   }, []);
@@ -471,9 +500,11 @@ function ExamenATest() {
     if (!fileData) return;
     setPhase("generating");
     try {
-      // Texto plano: no pesa, no hay timeout. 4000 tokens para que el JSON no se corte.
-      const raw = await askClaude(PROMPT_EXAMEN + "\n\nCONTENIDO DEL EXAMEN:\n" + fileData.data, 4000);
-      const match = raw.match(/\[[\s\S]*\]/);
+      // Texto plano truncado a 4000 chars para no saturar el contexto
+      const textoExamen = fileData.data.slice(0, 4000);
+      const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + textoExamen, 2000);
+      const clean = raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+      const match = clean.match(/\[[\s\S]*\]/);
       if (!match) throw new Error("No se pudo extraer el JSON de preguntas.");
       const qs = JSON.parse(match[0]);
       if (!Array.isArray(qs) || qs.length === 0) throw new Error("No se generaron preguntas.");
@@ -542,10 +573,10 @@ function ExamenATest() {
               ) : (
                 <>
                   <p style={{ fontSize:14, fontWeight:600, color:"var(--color-text)", margin:"0 0 4px" }}>Arrastra el PDF aqui o haz clic para seleccionar</p>
-                  <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:0 }}>PDF o .txt</p>
+                  <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:0 }}>PDF, .txt o .md</p>
                 </>
               )}
-              <input ref={fileRef} type="file" accept=".pdf,.txt" style={{ display:"none" }} onChange={(e) => loadFile(e.target.files[0])} />
+              <input ref={fileRef} type="file" accept=".pdf,.txt,.md" style={{ display:"none" }} onChange={(e) => loadFile(e.target.files[0])} />
             </div>
             {error && (
               <div style={{ color:"var(--color-danger)", fontSize:13, marginTop:12, padding:"10px 14px", background:"var(--color-danger-soft)", borderRadius:"var(--radius-md)", border:"1px solid #FCA5A5" }}>
@@ -554,13 +585,39 @@ function ExamenATest() {
             )}
           </div>
 
-          <div style={{ background:"var(--color-bg-soft)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"20px 24px", marginBottom:20 }}>
+          {repo.length > 0 && (
+            <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"20px 24px", marginBottom:16 }}>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+                <p style={{ fontSize:11, fontWeight:600, color:"var(--color-text-mute)", textTransform:"uppercase", letterSpacing:.6, margin:0 }}>Mis examenes guardados</p>
+                <span style={{ fontSize:11, color:"var(--color-text-mute)" }}>{repo.length}/20</span>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {repo.map(entry => (
+                  <div key={entry.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px", background:"var(--color-bg-soft)", borderRadius:"var(--radius-md)", border:"1px solid var(--color-border)" }}>
+                    <span style={{ fontSize:18, flexShrink:0 }}>📋</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <p style={{ fontSize:13, fontWeight:600, color:"var(--color-text)", margin:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{entry.name}</p>
+                      <p style={{ fontSize:11, color:"var(--color-text-mute)", margin:0 }}>{entry.date}</p>
+                    </div>
+                    <button onClick={() => loadFromRepo(entry)} style={{ ...primaryBtn, padding:"6px 14px", fontSize:12, flexShrink:0 }}>
+                      Hacer test
+                    </button>
+                    <button onClick={() => deleteFromRepo(entry.id)} style={{ flexShrink:0, width:28, height:28, borderRadius:"var(--radius-md)", border:"1px solid var(--color-border)", background:"var(--color-bg)", cursor:"pointer", fontSize:14, color:"var(--color-text-mute)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+                    <div style={{ background:"var(--color-bg-soft)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"20px 24px", marginBottom:20 }}>
             <p style={{ fontSize:11, fontWeight:600, color:"var(--color-text-mute)", textTransform:"uppercase", letterSpacing:.6, margin:"0 0 12px" }}>Como funciona?</p>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
               {[
                 { icon:"📤", t:"Sube el examen", d:"PDF o texto de examenes reales de oposicion, ya sean teoricos o practicos." },
                 { icon:"🤖", t:"La IA lo analiza", d:"Extrae conceptos clave, datos y procedimientos del examen para construir el test." },
-                { icon:"❓", t:"Responde el test", d:"Entre 10 y 20 preguntas tipo test con cuatro opciones y una unica respuesta correcta." },
+                { icon:"❓", t:"Responde el test", d:"5 preguntas tipo test con cuatro opciones y una unica respuesta correcta." },
                 { icon:"📊", t:"Ve tu puntuacion", d:"Resultado con porcentaje, explicacion de cada respuesta y revision completa." },
               ].map(item => (
                 <div key={item.t} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
