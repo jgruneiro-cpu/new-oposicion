@@ -2,7 +2,10 @@ import { useState, useMemo, useRef, useCallback } from "react";
 import Simulacro from "./Simulacro";
 import Estadisticas from "./Estadisticas";
 
-const API_URL = "/.netlify/functions/claude";
+// Llamada directa a Anthropic — sin pasar por Netlify Functions
+// La key está en el frontend pero la app es de uso privado (una sola alumna)
+const API_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
 
 // ═══════════════════════════════════════════════════════════════
 // DATOS
@@ -135,7 +138,12 @@ const GLOSARIO = [
 async function askClaude(prompt, maxTokens = 1000) {
   const res = await fetch(API_URL, {
     method: "POST",
-    headers: { "Content-Type":"application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
       max_tokens: maxTokens,
@@ -152,7 +160,12 @@ async function askClaude(prompt, maxTokens = 1000) {
 async function askClaudeConDoc(messages) {
   const res = await fetch(API_URL, {
     method: "POST",
-    headers: { "Content-Type":"application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": ANTHROPIC_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
     body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 4000, messages }),
   });
   if (!res.ok) throw new Error("API " + res.status);
@@ -392,14 +405,15 @@ const secondaryBtn = {
 // ═══════════════════════════════════════════════════════════════
 
 const PROMPT_EXAMEN = `Eres un experto en oposiciones de Auxiliares de Archivos, Bibliotecas y Museos de la Comunidad de Madrid.
-Analiza el examen y genera EXACTAMENTE 5 preguntas tipo test en español.
+Analiza este fragmento de examen y genera EXACTAMENTE 5 preguntas tipo test en español.
+Si el fragmento contiene preguntas numeradas del examen original, convierte directamente esas preguntas en formato test manteniendo su contenido exacto.
+Si no hay preguntas numeradas, crea preguntas sobre los conceptos que aparecen.
 REGLAS ESTRICTAS:
-- 4 opciones por pregunta, maximo 8 palabras cada opcion
-- 1 sola correcta
-- Si hay CDU, MARC21 o catalogacion: pregunta sobre eso
-- explanation: maximo 1 frase corta
-- Devuelve SOLO el array JSON, sin texto antes ni despues, sin backticks:
-[{"question":"...","type":"CDU|MARC21|Catalogacion|Servicios","options":["A","B","C","D"],"correct":0,"explanation":"..."}]`;
+- 4 opciones por pregunta, maximo 10 palabras cada opcion
+- 1 sola respuesta correcta
+- explanation: 1 frase corta
+- Devuelve SOLO el array JSON sin backticks ni texto extra:
+[{"question":"...","type":"CDU|MARC21|Catalogacion|Servicios|Legislacion","options":["A","B","C","D"],"correct":0,"explanation":"..."}]`;
 
 function ExamenATest() {
   const [phase, setPhase] = useState("idle");
@@ -496,19 +510,44 @@ function ExamenATest() {
     loadFile(e.dataTransfer.files[0]);
   }, [loadFile]);
 
+  const [genProgress, setGenProgress] = useState("");
+
+  // Divide el texto en N trozos iguales
+  function chunkText(text, n) {
+    const size = Math.ceil(text.length / n);
+    const chunks = [];
+    for (let i = 0; i < n; i++) chunks.push(text.slice(i * size, (i + 1) * size));
+    return chunks.filter(c => c.trim().length > 50);
+  }
+
+  async function parseQuestions(raw) {
+    const clean = raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+    const match = clean.match(/\[[\s\S]*?\]/);
+    if (!match) return [];
+    try { return JSON.parse(match[0]); } catch { return []; }
+  }
+
   const generate = useCallback(async () => {
     if (!fileData) return;
     setPhase("generating");
+    setGenProgress("Analizando el examen...");
     try {
-      // Texto plano truncado a 4000 chars para no saturar el contexto
-      const textoExamen = fileData.data.slice(0, 4000);
-      const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + textoExamen, 2000);
-      const clean = raw.replace(/```json/gi,"").replace(/```/g,"").trim();
-      const match = clean.match(/\[[\s\S]*\]/);
-      if (!match) throw new Error("No se pudo extraer el JSON de preguntas.");
-      const qs = JSON.parse(match[0]);
-      if (!Array.isArray(qs) || qs.length === 0) throw new Error("No se generaron preguntas.");
-      setQuestions(qs);
+      const texto = fileData.data;
+      const TROZO = 3000; // chars por trozo
+      const NUM_TROZOS = Math.min(13, Math.ceil(texto.length / TROZO));
+      const trozos = chunkText(texto, NUM_TROZOS);
+
+      let todasLasPreguntas = [];
+
+      for (let i = 0; i < trozos.length; i++) {
+        setGenProgress(`Generando preguntas (parte ${i + 1} de ${trozos.length})...`);
+        const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + trozos[i], 2000);
+        const qs = await parseQuestions(raw);
+        todasLasPreguntas = todasLasPreguntas.concat(qs);
+      }
+
+      if (todasLasPreguntas.length === 0) throw new Error("No se generaron preguntas.");
+      setQuestions(todasLasPreguntas);
       setAnswers({});
       setShowExp({});
       setCurrent(0);
@@ -617,7 +656,7 @@ function ExamenATest() {
               {[
                 { icon:"📤", t:"Sube el examen", d:"PDF o texto de examenes reales de oposicion, ya sean teoricos o practicos." },
                 { icon:"🤖", t:"La IA lo analiza", d:"Extrae conceptos clave, datos y procedimientos del examen para construir el test." },
-                { icon:"❓", t:"Responde el test", d:"5 preguntas tipo test con cuatro opciones y una unica respuesta correcta." },
+                { icon:"❓", t:"Responde el test", d:"Hasta 65 preguntas tipo test con cuatro opciones y una unica respuesta correcta." },
                 { icon:"📊", t:"Ve tu puntuacion", d:"Resultado con porcentaje, explicacion de cada respuesta y revision completa." },
               ].map(item => (
                 <div key={item.t} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
@@ -649,9 +688,9 @@ function ExamenATest() {
 
       {phase === "generating" && (
         <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"60px 32px", textAlign:"center" }}>
-          <div style={{ fontSize:44, marginBottom:18 }}>&#9881;&#65039;</div>
-          <h2 style={{ fontSize:20, fontWeight:600, color:"var(--color-text)", margin:"0 0 10px" }}>Analizando el examen...</h2>
-          <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:"0 0 24px" }}>Esto puede tardar unos segundos.</p>
+          <div style={{ fontSize:44, marginBottom:18 }}>⚙️</div>
+          <h2 style={{ fontSize:20, fontWeight:600, color:"var(--color-text)", margin:"0 0 10px" }}>{genProgress || "Analizando el examen..."}</h2>
+          <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:"0 0 24px" }}>Esto puede tardar unos segundos por cada parte.</p>
           <div style={{ background:"var(--color-bg-soft)", borderRadius:6, height:6, overflow:"hidden" }}>
             <div style={{ height:"100%", background:"var(--color-accent)", borderRadius:6, animation:"pulse 1.5s ease-in-out infinite" }} />
           </div>
