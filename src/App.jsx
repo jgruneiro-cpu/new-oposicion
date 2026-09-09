@@ -132,13 +132,13 @@ const GLOSARIO = [
 // UTILIDADES API + JSON
 // ═══════════════════════════════════════════════════════════════
 
-async function askClaude(prompt) {
+async function askClaude(prompt, maxTokens = 1000) {
   const res = await fetch(API_URL, {
     method: "POST",
     headers: { "Content-Type":"application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
-      max_tokens: 1000,
+      max_tokens: maxTokens,
       messages: [{ role:"user", content: prompt }],
     }),
   });
@@ -392,8 +392,9 @@ const secondaryBtn = {
 // ═══════════════════════════════════════════════════════════════
 
 const PROMPT_EXAMEN = `Eres un experto en oposiciones de la Escala de Auxiliares de Archivos, Bibliotecas y Museos de la Comunidad de Madrid.
-Analiza el examen adjunto y genera entre 10 y 20 preguntas tipo test en español basadas EXCLUSIVAMENTE en el contenido del examen.
-REGLAS: Siempre 4 opciones, una sola correcta, distractores plausibles. Si el examen incluye CDU, MARC21, ordenacion o catalogacion: genera preguntas especificas sobre esos contenidos.
+Analiza el examen y genera EXACTAMENTE 10 preguntas tipo test en español basadas en el contenido del examen.
+REGLAS: Siempre 4 opciones, una sola correcta, distractores plausibles. Si hay CDU, MARC21, ordenacion o catalogacion: pregunta especificamente sobre esos contenidos.
+La explicacion de cada pregunta debe ser breve (maximo 2 frases).
 Devuelve UNICAMENTE un array JSON sin backticks ni markdown:
 [{"question":"...","type":"CDU|MARC21|Ordenacion|Servicios|Legislacion","options":["A","B","C","D"],"correct":0,"explanation":"..."}]
 El campo correct es el indice 0-3 de la opcion correcta.`;
@@ -470,8 +471,8 @@ function ExamenATest() {
     if (!fileData) return;
     setPhase("generating");
     try {
-      // Texto plano: no pesa, no hay timeout
-      const raw = await askClaude(PROMPT_EXAMEN + "\n\nCONTENIDO DEL EXAMEN:\n" + fileData.data);
+      // Texto plano: no pesa, no hay timeout. 4000 tokens para que el JSON no se corte.
+      const raw = await askClaude(PROMPT_EXAMEN + "\n\nCONTENIDO DEL EXAMEN:\n" + fileData.data, 4000);
       const match = raw.match(/\[[\s\S]*\]/);
       if (!match) throw new Error("No se pudo extraer el JSON de preguntas.");
       const qs = JSON.parse(match[0]);
