@@ -478,13 +478,17 @@ function ExamenATest() {
 
   const loadFile = useCallback(async (file) => {
     if (!file) return;
-    if (file.type !== "application/pdf" && !file.name.endsWith(".txt") && !file.name.endsWith(".md")) {
-      setError("Por favor sube un PDF, un archivo de texto (.txt) o un markdown (.md) con el examen.");
+    const isDocx = file.name.endsWith(".docx");
+    const isPdf = file.type === "application/pdf";
+    const isTxt = file.name.endsWith(".txt") || file.name.endsWith(".md");
+    if (!isPdf && !isDocx && !isTxt) {
+      setError("Por favor sube un PDF, Word (.docx), texto (.txt) o markdown (.md).");
       return;
     }
     setError("");
     setFileName(file.name);
-    if (file.type === "application/pdf") {
+
+    if (isPdf) {
       setPhase("extracting");
       try {
         const text = await extractPdfText(file);
@@ -492,10 +496,24 @@ function ExamenATest() {
         saveToRepo(file.name, text);
         setPhase("ready");
       } catch {
-        // Fallback si PDF.js falla
         const r = new FileReader();
         r.onload = (e) => { setFileData({ type: "text", data: e.target.result }); saveToRepo(file.name, e.target.result); setPhase("ready"); };
         r.readAsText(file);
+      }
+    } else if (isDocx) {
+      setPhase("extracting");
+      try {
+        // Extraer texto de docx usando mammoth via CDN
+        const mammoth = await import("https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js");
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        const text = result.value;
+        setFileData({ type: "text", data: text });
+        saveToRepo(file.name, text);
+        setPhase("ready");
+      } catch (err) {
+        setError("No se pudo leer el .docx: " + err.message);
+        setPhase("idle");
       }
     } else {
       const reader = new FileReader();
@@ -612,10 +630,10 @@ function ExamenATest() {
               ) : (
                 <>
                   <p style={{ fontSize:14, fontWeight:600, color:"var(--color-text)", margin:"0 0 4px" }}>Arrastra el PDF aqui o haz clic para seleccionar</p>
-                  <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:0 }}>PDF, .txt o .md</p>
+                  <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:0 }}>PDF, Word (.docx), .txt o .md</p>
                 </>
               )}
-              <input ref={fileRef} type="file" accept=".pdf,.txt,.md" style={{ display:"none" }} onChange={(e) => loadFile(e.target.files[0])} />
+              <input ref={fileRef} type="file" accept=".pdf,.docx,.txt,.md" style={{ display:"none" }} onChange={(e) => loadFile(e.target.files[0])} />
             </div>
             {error && (
               <div style={{ color:"var(--color-danger)", fontSize:13, marginTop:12, padding:"10px 14px", background:"var(--color-danger-soft)", borderRadius:"var(--radius-md)", border:"1px solid #FCA5A5" }}>
