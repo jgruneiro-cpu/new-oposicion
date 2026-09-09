@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import Simulacro from "./Simulacro";
 import Estadisticas from "./Estadisticas";
 
@@ -141,6 +141,19 @@ async function askClaude(prompt) {
       max_tokens: 1000,
       messages: [{ role:"user", content: prompt }],
     }),
+  });
+  if (!res.ok) throw new Error("API " + res.status);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+}
+
+
+async function askClaudeConDoc(messages) {
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type":"application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 4000, messages }),
   });
   if (!res.ok) throw new Error("API " + res.status);
   const data = await res.json();
@@ -375,6 +388,337 @@ const secondaryBtn = {
 };
 
 // ═══════════════════════════════════════════════════════════════
+// MÓDULO: EXAMEN → TEST
+// ═══════════════════════════════════════════════════════════════
+
+const PROMPT_EXAMEN = `Eres un experto en oposiciones de la Escala de Auxiliares de Archivos, Bibliotecas y Museos de la Comunidad de Madrid.
+Analiza el examen adjunto y genera entre 10 y 20 preguntas tipo test en español basadas EXCLUSIVAMENTE en el contenido del examen.
+REGLAS: Siempre 4 opciones, una sola correcta, distractores plausibles. Si el examen incluye CDU, MARC21, ordenacion o catalogacion: genera preguntas especificas sobre esos contenidos.
+Devuelve UNICAMENTE un array JSON sin backticks ni markdown:
+[{"question":"...","type":"CDU|MARC21|Ordenacion|Servicios|Legislacion","options":["A","B","C","D"],"correct":0,"explanation":"..."}]
+El campo correct es el indice 0-3 de la opcion correcta.`;
+
+function ExamenATest() {
+  const [phase, setPhase] = useState("idle");
+  const [fileName, setFileName] = useState("");
+  const [fileData, setFileData] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [questions, setQuestions] = useState([]);
+  const [current, setCurrent] = useState(0);
+  const [answers, setAnswers] = useState({});
+  const [showExp, setShowExp] = useState({});
+  const [error, setError] = useState("");
+  const fileRef = useRef();
+
+  const loadFile = useCallback(async (file) => {
+    if (!file) return;
+    if (file.type !== "application/pdf" && !file.name.endsWith(".txt")) {
+      setError("Por favor sube un PDF o un archivo de texto (.txt) con el examen.");
+      return;
+    }
+    setError("");
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      if (file.type === "application/pdf") {
+        setFileData({ type: "pdf", data: e.target.result.split(",")[1] });
+      } else {
+        setFileData({ type: "text", data: e.target.result });
+      }
+      setPhase("ready");
+    };
+    if (file.type === "application/pdf") reader.readAsDataURL(file);
+    else reader.readAsText(file);
+  }, []);
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault();
+    setDragOver(false);
+    loadFile(e.dataTransfer.files[0]);
+  }, [loadFile]);
+
+  const generate = useCallback(async () => {
+    if (!fileData) return;
+    setPhase("generating");
+    try {
+      let raw;
+      if (fileData.type === "pdf") {
+        raw = await askClaudeConDoc([{
+          role: "user",
+          content: [
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: fileData.data } },
+            { type: "text", text: PROMPT_EXAMEN },
+          ],
+        }]);
+      } else {
+        raw = await askClaude(PROMPT_EXAMEN + "\n\nCONTENIDO DEL EXAMEN:\n" + fileData.data);
+      }
+      const match = raw.match(/\[[\s\S]*\]/);
+      if (!match) throw new Error("No se pudo extraer el JSON de preguntas.");
+      const qs = JSON.parse(match[0]);
+      if (!Array.isArray(qs) || qs.length === 0) throw new Error("No se generaron preguntas.");
+      setQuestions(qs);
+      setAnswers({});
+      setShowExp({});
+      setCurrent(0);
+      setPhase("quiz");
+    } catch (err) {
+      setError("Error generando las preguntas: " + err.message);
+      setPhase("ready");
+    }
+  }, [fileData]);
+
+  const answerQ = useCallback((qIdx, optIdx) => {
+    if (answers[qIdx] !== undefined) return;
+    setAnswers(prev => ({ ...prev, [qIdx]: optIdx }));
+  }, [answers]);
+
+  const totalAnswered = Object.keys(answers).length;
+  const correctCount = Object.entries(answers).filter(([i, a]) => a === questions[i]?.correct).length;
+  const pct = questions.length ? Math.round((correctCount / questions.length) * 100) : 0;
+  const isAnswered = (idx) => answers[idx] !== undefined;
+
+  const getOptState = (qIdx, optIdx) => {
+    if (!isAnswered(qIdx)) return "idle";
+    if (optIdx === questions[qIdx]?.correct) return "correct";
+    if (optIdx === answers[qIdx]) return "wrong";
+    return "idle";
+  };
+
+  const reset = () => {
+    setPhase("idle"); setFileName(""); setFileData(null);
+    setQuestions([]); setAnswers({}); setShowExp({}); setError(""); setCurrent(0);
+  };
+
+  return (
+    <div style={{ maxWidth:820, margin:"0 auto", padding:"40px 32px" }}>
+      <p style={sectionEyebrow}>Practica con examenes reales</p>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:28, flexWrap:"wrap", gap:12 }}>
+        <h1 style={{ ...sectionH1, margin:0 }}>Examen &rarr; Test</h1>
+        {phase !== "idle" && phase !== "generating" && (
+          <button onClick={reset} style={secondaryBtn}>&larr; Nuevo examen</button>
+        )}
+      </div>
+
+      {(phase === "idle" || phase === "ready") && (
+        <>
+          <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"24px", marginBottom:16 }}>
+            <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:"0 0 16px", lineHeight:1.6 }}>
+              Sube un examen real de oposicion (PDF o texto) y la IA lo convierte en preguntas tipo test para que puedas evaluarte.
+            </p>
+            <div
+              style={{ border:"2px dashed " + (dragOver ? "var(--color-accent)" : "var(--color-border)"), borderRadius:"var(--radius-lg)", padding:"36px 24px", textAlign:"center", cursor:"pointer", background: dragOver ? "var(--color-accent-soft)" : "var(--color-bg-soft)", transition:"all .2s" }}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={onDrop}
+              onClick={() => fileRef.current.click()}
+            >
+              <div style={{ fontSize:32, marginBottom:10 }}>{fileName ? "✅" : "📂"}</div>
+              {fileName ? (
+                <>
+                  <p style={{ fontSize:14, fontWeight:600, color:"var(--color-text)", margin:"0 0 4px" }}>{fileName}</p>
+                  <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:0 }}>Archivo listo · haz clic para cambiar</p>
+                </>
+              ) : (
+                <>
+                  <p style={{ fontSize:14, fontWeight:600, color:"var(--color-text)", margin:"0 0 4px" }}>Arrastra el PDF aqui o haz clic para seleccionar</p>
+                  <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:0 }}>PDF o .txt</p>
+                </>
+              )}
+              <input ref={fileRef} type="file" accept=".pdf,.txt" style={{ display:"none" }} onChange={(e) => loadFile(e.target.files[0])} />
+            </div>
+            {error && (
+              <div style={{ color:"var(--color-danger)", fontSize:13, marginTop:12, padding:"10px 14px", background:"var(--color-danger-soft)", borderRadius:"var(--radius-md)", border:"1px solid #FCA5A5" }}>
+                &#9888; {error}
+              </div>
+            )}
+          </div>
+
+          <div style={{ background:"var(--color-bg-soft)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"20px 24px", marginBottom:20 }}>
+            <p style={{ fontSize:11, fontWeight:600, color:"var(--color-text-mute)", textTransform:"uppercase", letterSpacing:.6, margin:"0 0 12px" }}>Como funciona?</p>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+              {[
+                { icon:"📤", t:"Sube el examen", d:"PDF o texto de examenes reales de oposicion, ya sean teoricos o practicos." },
+                { icon:"🤖", t:"La IA lo analiza", d:"Extrae conceptos clave, datos y procedimientos del examen para construir el test." },
+                { icon:"❓", t:"Responde el test", d:"Entre 10 y 20 preguntas tipo test con cuatro opciones y una unica respuesta correcta." },
+                { icon:"📊", t:"Ve tu puntuacion", d:"Resultado con porcentaje, explicacion de cada respuesta y revision completa." },
+              ].map(item => (
+                <div key={item.t} style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                  <span style={{ fontSize:20, marginTop:2 }}>{item.icon}</span>
+                  <div>
+                    <p style={{ fontSize:13, fontWeight:600, color:"var(--color-text)", margin:"0 0 3px" }}>{item.t}</p>
+                    <p style={{ fontSize:12, color:"var(--color-text-soft)", margin:0, lineHeight:1.5 }}>{item.d}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {phase === "ready" && (
+            <button style={{ ...primaryBtn, width:"100%", padding:"13px", fontSize:15 }} onClick={generate}>
+              Generar test a partir de este examen
+            </button>
+          )}
+        </>
+      )}
+
+      {phase === "generating" && (
+        <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"60px 32px", textAlign:"center" }}>
+          <div style={{ fontSize:44, marginBottom:18 }}>&#9881;&#65039;</div>
+          <h2 style={{ fontSize:20, fontWeight:600, color:"var(--color-text)", margin:"0 0 10px" }}>Analizando el examen...</h2>
+          <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:"0 0 24px" }}>Esto puede tardar unos segundos.</p>
+          <div style={{ background:"var(--color-bg-soft)", borderRadius:6, height:6, overflow:"hidden" }}>
+            <div style={{ height:"100%", background:"var(--color-accent)", borderRadius:6, animation:"pulse 1.5s ease-in-out infinite" }} />
+          </div>
+        </div>
+      )}
+
+      {phase === "quiz" && questions.length > 0 && (() => {
+        const q = questions[current];
+        return (
+          <>
+            <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"14px 20px", marginBottom:14 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--color-text-soft)", marginBottom:8 }}>
+                <span>Pregunta <strong>{current+1}</strong> de <strong>{questions.length}</strong></span>
+                <span>Respondidas: <strong>{totalAnswered}</strong>/{questions.length}</span>
+              </div>
+              <div style={{ background:"var(--color-bg-soft)", borderRadius:6, height:5, overflow:"hidden", marginBottom:10 }}>
+                <div style={{ height:"100%", width:((current+1)/questions.length*100) + "%", background:"var(--color-accent)", borderRadius:6, transition:"width .3s" }} />
+              </div>
+              <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                {questions.map((_, i) => (
+                  <button key={i} onClick={() => setCurrent(i)} style={{
+                    width:26, height:26, borderRadius:6, border:"none", cursor:"pointer", fontSize:10, fontWeight:700,
+                    background: i === current ? "var(--color-accent)" : isAnswered(i) ? (answers[i] === questions[i].correct ? "var(--color-success)" : "var(--color-danger)") : "var(--color-bg-soft)",
+                    color: i === current || isAnswered(i) ? "white" : "var(--color-text-mute)",
+                  }}>{i+1}</button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"24px" }}>
+              {q.type && <span style={{ ...pill, marginBottom:12, display:"inline-flex" }}>{q.type}</span>}
+              <p style={{ fontSize:16, fontWeight:600, color:"var(--color-text)", lineHeight:1.5, margin:"0 0 18px" }}>
+                {current+1}. {q.question}
+              </p>
+
+              {q.options.map((opt, oi) => {
+                const answered = isAnswered(current);
+                const st = getOptState(current, oi);
+                const isSel = !answered && answers[current] === oi;
+                const borderColor = st === "correct" ? "#9FE1CB" : st === "wrong" ? "#FCA5A5" : isSel ? "var(--color-accent)" : "var(--color-border)";
+                const bgColor = st === "correct" ? "var(--color-success-soft)" : st === "wrong" ? "var(--color-danger-soft)" : isSel ? "var(--color-accent-soft)" : "var(--color-bg)";
+                const letterBg = st === "correct" ? "var(--color-success)" : st === "wrong" ? "var(--color-danger)" : isSel ? "var(--color-accent)" : "var(--color-bg-soft)";
+                const letterColor = (st !== "idle" || isSel) ? "white" : "var(--color-text-soft)";
+                return (
+                  <div key={oi}
+                    style={{ display:"flex", alignItems:"flex-start", gap:12, padding:"11px 14px", borderRadius:"var(--radius-md)", marginBottom:7, cursor: !answered ? "pointer" : "default", border:"1.5px solid " + borderColor, background:bgColor, transition:"all .15s" }}
+                    onClick={() => { if (!answered) answerQ(current, oi); }}
+                  >
+                    <span style={{ flexShrink:0, width:24, height:24, borderRadius:"50%", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, background:letterBg, color:letterColor, border: (st === "idle" && !isSel) ? "1px solid var(--color-border)" : "none" }}>
+                      {String.fromCharCode(65+oi)}
+                    </span>
+                    <span style={{ fontSize:13, color:"var(--color-text)", lineHeight:1.5, paddingTop:2 }}>{opt}</span>
+                    {st === "correct" && <span style={{ marginLeft:"auto", color:"var(--color-success)", fontWeight:700 }}>&#10003;</span>}
+                    {st === "wrong" && <span style={{ marginLeft:"auto", color:"var(--color-danger)", fontWeight:700 }}>&#10007;</span>}
+                  </div>
+                );
+              })}
+
+              {isAnswered(current) && q.explanation && (
+                <div style={{ marginTop:10 }}>
+                  <button onClick={() => setShowExp(p => ({ ...p, [current]: !p[current] }))} style={{ ...secondaryBtn, fontSize:12, padding:"6px 14px" }}>
+                    {showExp[current] ? "Ocultar" : "Ver"} explicacion
+                  </button>
+                  {showExp[current] && (
+                    <div style={{ background:"#EFF6FF", border:"1px solid #BFDBFE", borderRadius:"var(--radius-md)", padding:"12px 16px", marginTop:8, fontSize:13, color:"#1E40AF", lineHeight:1.6 }}>
+                      💡 {q.explanation}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div style={{ display:"flex", justifyContent:"space-between", marginTop:20 }}>
+                <button style={{ ...secondaryBtn, opacity: current === 0 ? .4 : 1 }} disabled={current === 0} onClick={() => setCurrent(current-1)}>
+                  &larr; Anterior
+                </button>
+                {current < questions.length-1 ? (
+                  <button style={primaryBtn} onClick={() => setCurrent(current+1)}>Siguiente &rarr;</button>
+                ) : (
+                  <button
+                    style={{ ...primaryBtn, opacity: totalAnswered < questions.length ? .4 : 1 }}
+                    disabled={totalAnswered < questions.length}
+                    onClick={() => setPhase("results")}>
+                    Ver resultado &rarr;
+                  </button>
+                )}
+              </div>
+              {current === questions.length-1 && totalAnswered < questions.length && (
+                <p style={{ fontSize:11, color:"var(--color-text-mute)", textAlign:"right", marginTop:6 }}>
+                  Responde todas las preguntas para ver el resultado
+                </p>
+              )}
+            </div>
+          </>
+        );
+      })()}
+
+      {phase === "results" && (
+        <>
+          <div style={{ background: pct >= 50 ? "var(--color-success)" : "var(--color-danger)", borderRadius:"var(--radius-lg)", padding:"32px", textAlign:"center", marginBottom:16 }}>
+            <p style={{ fontSize:56, fontWeight:800, color:"white", margin:"0 0 4px", lineHeight:1 }}>{pct}%</p>
+            <p style={{ fontSize:17, fontWeight:600, color:"white", margin:"0 0 6px" }}>
+              {pct >= 70 ? "Muy bien! Dominas el tema." : pct >= 50 ? "Aprobado, pero con margen de mejora." : "No has llegado al aprobado. Sigue practicando!"}
+            </p>
+            <p style={{ fontSize:13, color:"rgba(255,255,255,.8)", margin:0 }}>
+              {correctCount} correctas &middot; {totalAnswered-correctCount} incorrectas
+            </p>
+          </div>
+
+          <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"22px", marginBottom:16 }}>
+            <p style={{ fontSize:11, fontWeight:600, color:"var(--color-text-mute)", textTransform:"uppercase", letterSpacing:.6, margin:"0 0 16px" }}>Revision completa</p>
+            {questions.map((q, i) => {
+              const isC = answers[i] === q.correct;
+              return (
+                <div key={i} style={{ borderBottom:"1px solid var(--color-border-soft)", padding:"14px 0" }}>
+                  <div style={{ display:"flex", gap:10, alignItems:"flex-start" }}>
+                    <span style={{ fontSize:18, flexShrink:0 }}>{isC ? "✅" : "❌"}</span>
+                    <div style={{ flex:1 }}>
+                      <p style={{ fontSize:13, fontWeight:600, color:"var(--color-text)", margin:"0 0 6px" }}>{i+1}. {q.question}</p>
+                      <p style={{ fontSize:12, color: isC ? "var(--color-success)" : "var(--color-danger)", margin:"0 0 3px" }}>
+                        Tu respuesta: {q.options[answers[i]]}
+                      </p>
+                      {!isC && (
+                        <p style={{ fontSize:12, color:"var(--color-success)", margin:"0 0 4px" }}>
+                          Correcta: {q.options[q.correct]}
+                        </p>
+                      )}
+                      {q.explanation && (
+                        <p style={{ fontSize:12, color:"var(--color-text-soft)", margin:"6px 0 0", padding:"8px 12px", background:"var(--color-bg-soft)", borderRadius:"var(--radius-md)", lineHeight:1.5 }}>
+                          💡 {q.explanation}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ display:"flex", gap:10 }}>
+            <button style={{ ...primaryBtn, flex:1 }} onClick={() => { setAnswers({}); setShowExp({}); setCurrent(0); setPhase("quiz"); }}>
+              Repetir test
+            </button>
+            <button style={secondaryBtn} onClick={reset}>Subir otro examen</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // SECCIÓN: PORTADA
 // ═══════════════════════════════════════════════════════════════
 
@@ -410,11 +754,8 @@ function Portada({ onGoTo, onSimulacro, onStats }) {
           desc="Evolución, categorías y puntos débiles"
           onClick={onStats}
         />
-        <CardAccion
-          titulo="📚 Estudiar un tema"
-          desc="16 temas del programa oficial"
-          onClick={() => onGoTo("temario")}
-        />
+        <CardAccion titulo="📚 Estudiar un tema" desc="16 temas del programa oficial" onClick={() => onGoTo("temario")} />
+        <CardAccion titulo="📄 Examen → Test" desc="Sube un examen real y conviértelo en test" onClick={() => onGoTo("examen")} />
       </div>
 
       <div style={{
@@ -490,6 +831,7 @@ function Introduccion() {
           <li><strong>Practica</strong> con 5 preguntas rápidas para consolidar.</li>
           <li>Cada semana, <strong>haz un simulacro completo</strong> (100 preguntas, 90 min).</li>
           <li>Revisa <strong>Mi progreso</strong> y ataca los temas débiles.</li>
+          <li><strong>Sube exámenes reales</strong> con Examen → Test para practicar con material oficial.</li>
         </ol>
       </Bloque>
 
@@ -878,6 +1220,7 @@ const MENU = [
   { id:"documentos",    icon:"📄", label:"Documentos",
     subs: ["Todos","Exámenes","Marco legal","Bibliografía","Instituciones","Estadísticas"] },
   { id:"glosario",      icon:"📓", label:"Glosario" },
+  { id:"examen",        icon:"🧪", label:"Examen → Test" },
 ];
 
 export default function App() {
@@ -914,6 +1257,7 @@ export default function App() {
     <>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100%{opacity:.5;width:30%} 50%{opacity:1;width:80%} }
         * { box-sizing: border-box; }
       `}</style>
 
@@ -1018,7 +1362,7 @@ export default function App() {
           </nav>
 
           <div style={{ padding:"12px 22px", borderTop:"1px solid var(--color-border)", fontSize:10, color:"var(--color-text-mute)" }}>
-            v1.0 · {TEMAS.length} temas
+            v1.1 · {TEMAS.length} temas
           </div>
         </aside>
 
@@ -1045,6 +1389,7 @@ export default function App() {
           )}
           {seccion === "documentos" && <Documentos subGrupo={subGrupo} />}
           {seccion === "glosario" && <Glosario />}
+          {seccion === "examen" && <ExamenATest />}
         </main>
       </div>
     </>
