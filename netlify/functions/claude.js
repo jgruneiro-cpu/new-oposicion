@@ -24,7 +24,7 @@ export default async (req) => {
   try {
     body = await req.json();
   } catch {
-    return new Response(JSON.stringify({ error: "JSON inválido" }), {
+    return new Response(JSON.stringify({ error: "JSON invalido" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
@@ -38,11 +38,7 @@ export default async (req) => {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({
-        model: body.model || "claude-sonnet-4-5",
-        max_tokens: body.max_tokens || 1024,
-        messages: body.messages || [],
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = await upstream.json();
@@ -61,4 +57,5 @@ export default async (req) => {
 
 export const config = {
   path: "/.netlify/functions/claude",
+  maxDuration: 26,
 };
