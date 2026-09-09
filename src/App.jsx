@@ -559,12 +559,16 @@ function ExamenATest() {
 
       for (let i = 0; i < trozos.length; i++) {
         setGenProgress(`Generando preguntas (parte ${i + 1} de ${trozos.length})...`);
-        const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + trozos[i], 2000);
-        const qs = await parseQuestions(raw);
-        todasLasPreguntas = todasLasPreguntas.concat(qs);
+        try {
+          const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + trozos[i], 2000);
+          const qs = await parseQuestions(raw);
+          todasLasPreguntas = todasLasPreguntas.concat(qs);
+        } catch {
+          // Si un trozo falla, continuar con el siguiente
+        }
       }
 
-      if (todasLasPreguntas.length === 0) throw new Error("No se generaron preguntas.");
+      if (todasLasPreguntas.length === 0) throw new Error("No se generaron preguntas. Prueba con otro archivo.");
       setQuestions(todasLasPreguntas);
       setAnswers({});
       setShowExp({});
