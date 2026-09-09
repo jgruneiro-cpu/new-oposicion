@@ -410,6 +410,29 @@ function ExamenATest() {
   const [error, setError] = useState("");
   const fileRef = useRef();
 
+  // Extrae texto de un PDF usando PDF.js via CDN
+  async function extractPdfText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const pdfjsLib = await import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js");
+          pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+          const pdf = await pdfjsLib.getDocument({ data: e.target.result }).promise;
+          let text = "";
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            text += content.items.map(item => item.str).join(" ") + "\n";
+          }
+          resolve(text.trim());
+        } catch (err) { reject(err); }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
   const loadFile = useCallback(async (file) => {
     if (!file) return;
     if (file.type !== "application/pdf" && !file.name.endsWith(".txt")) {
@@ -418,17 +441,23 @@ function ExamenATest() {
     }
     setError("");
     setFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      if (file.type === "application/pdf") {
-        setFileData({ type: "pdf", data: e.target.result.split(",")[1] });
-      } else {
-        setFileData({ type: "text", data: e.target.result });
+    if (file.type === "application/pdf") {
+      setPhase("extracting");
+      try {
+        const text = await extractPdfText(file);
+        setFileData({ type: "text", data: text });
+        setPhase("ready");
+      } catch {
+        // Fallback si PDF.js falla
+        const r = new FileReader();
+        r.onload = (e) => { setFileData({ type: "text", data: e.target.result }); setPhase("ready"); };
+        r.readAsText(file);
       }
-      setPhase("ready");
-    };
-    if (file.type === "application/pdf") reader.readAsDataURL(file);
-    else reader.readAsText(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => { setFileData({ type: "text", data: e.target.result }); setPhase("ready"); };
+      reader.readAsText(file);
+    }
   }, []);
 
   const onDrop = useCallback((e) => {
@@ -441,18 +470,8 @@ function ExamenATest() {
     if (!fileData) return;
     setPhase("generating");
     try {
-      let raw;
-      if (fileData.type === "pdf") {
-        raw = await askClaudeConDoc([{
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: fileData.data } },
-            { type: "text", text: PROMPT_EXAMEN },
-          ],
-        }]);
-      } else {
-        raw = await askClaude(PROMPT_EXAMEN + "\n\nCONTENIDO DEL EXAMEN:\n" + fileData.data);
-      }
+      // Texto plano: no pesa, no hay timeout
+      const raw = await askClaude(PROMPT_EXAMEN + "\n\nCONTENIDO DEL EXAMEN:\n" + fileData.data);
       const match = raw.match(/\[[\s\S]*\]/);
       if (!match) throw new Error("No se pudo extraer el JSON de preguntas.");
       const qs = JSON.parse(match[0]);
@@ -560,6 +579,14 @@ function ExamenATest() {
             </button>
           )}
         </>
+      )}
+
+      {phase === "extracting" && (
+        <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"40px 32px", textAlign:"center" }}>
+          <div style={{ fontSize:36, marginBottom:14 }}>📄</div>
+          <h2 style={{ fontSize:18, fontWeight:600, color:"var(--color-text)", margin:"0 0 8px" }}>Leyendo el PDF...</h2>
+          <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:0 }}>Extrayendo texto del examen, un momento.</p>
+        </div>
       )}
 
       {phase === "generating" && (
