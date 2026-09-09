@@ -503,9 +503,9 @@ function ExamenATest() {
     } else if (isDocx) {
       setPhase("extracting");
       try {
-        // Extraer texto de docx usando mammoth via CDN
-        const mammoth = await import("https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js");
         const arrayBuffer = await file.arrayBuffer();
+        // mammoth está disponible como librería del entorno React
+        const { default: mammoth } = await import("mammoth");
         const result = await mammoth.extractRawText({ arrayBuffer });
         const text = result.value;
         setFileData({ type: "text", data: text });
