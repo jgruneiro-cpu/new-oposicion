@@ -2,10 +2,10 @@ import { useState, useMemo, useRef, useCallback } from "react";
 import Simulacro from "./Simulacro";
 import Estadisticas from "./Estadisticas";
 
-// Llamada directa a Anthropic — sin pasar por Netlify Functions
-// La key está en el frontend pero la app es de uso privado (una sola alumna)
-const API_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_KEY;
+// Todas las llamadas pasan por la Netlify Function, que guarda la ANTHROPIC_API_KEY
+// en el servidor. La clave nunca viaja al navegador.
+// NO usar import.meta.env.VITE_* para secretos: Vite los incrusta en el bundle público.
+const API_URL = "/.netlify/functions/claude";
 
 // ═══════════════════════════════════════════════════════════════
 // DATOS
@@ -138,20 +138,15 @@ const GLOSARIO = [
 async function askClaude(prompt, maxTokens = 1000) {
   const res = await fetch(API_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
       max_tokens: maxTokens,
       messages: [{ role:"user", content: prompt }],
     }),
   });
-  if (!res.ok) throw new Error("API " + res.status);
-  const data = await res.json();
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error?.message || `API ${res.status}`);
   if (data.error) throw new Error(data.error.message);
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
 }
@@ -160,16 +155,11 @@ async function askClaude(prompt, maxTokens = 1000) {
 async function askClaudeConDoc(messages) {
   const res = await fetch(API_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 4000, messages }),
   });
-  if (!res.ok) throw new Error("API " + res.status);
-  const data = await res.json();
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error?.message || `API ${res.status}`);
   if (data.error) throw new Error(data.error.message);
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
 }
