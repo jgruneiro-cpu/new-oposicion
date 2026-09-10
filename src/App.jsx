@@ -528,11 +528,24 @@ function ExamenATest() {
     return chunks.filter(c => c.trim().length > 50);
   }
 
-  async function parseQuestions(raw) {
-    const clean = raw.replace(/```json/gi,"").replace(/```/g,"").trim();
-    const match = clean.match(/\[[\s\S]*?\]/);
-    if (!match) return [];
-    try { return JSON.parse(match[0]); } catch { return []; }
+  // Reutiliza el tryJSON del módulo, que usa una regex CODICIOSA.
+  //
+  // La versión anterior usaba /\[[\s\S]*?\]/ — no codiciosa por culpa del "?" —
+  // que cortaba en el primer "]" encontrado. Y ese primer "]" no es el que cierra
+  // el array de preguntas: es el que cierra el array "options" de la PRIMERA
+  // pregunta. El JSON llegaba partido por la mitad, JSON.parse lanzaba, el catch
+  // devolvía [] y esto pasaba en TODOS los trozos, siempre. De ahí el
+  // "No se generaron preguntas" pasara el archivo que pasara.
+  function parseQuestions(raw) {
+    const arr = tryJSON(raw);
+    if (!Array.isArray(arr)) return [];
+    // Descarta preguntas mal formadas en vez de romper el test entero al pintarlas
+    return arr.filter(q =>
+      q &&
+      typeof q.question === "string" && q.question.trim() &&
+      Array.isArray(q.options) && q.options.length >= 2 &&
+      Number.isInteger(q.correct) && q.correct >= 0 && q.correct < q.options.length
+    );
   }
 
   const generate = useCallback(async () => {
@@ -546,19 +559,31 @@ function ExamenATest() {
       const trozos = chunkText(texto, NUM_TROZOS);
 
       let todasLasPreguntas = [];
+      let erroresApi = 0;       // la llamada falló
+      let sinInterpretar = 0;   // la IA respondió pero no salió ninguna pregunta válida
+      let ultimoError = null;
 
       for (let i = 0; i < trozos.length; i++) {
         setGenProgress(`Generando preguntas (parte ${i + 1} de ${trozos.length})...`);
         try {
           const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + trozos[i], 2000);
-          const qs = await parseQuestions(raw);
+          const qs = parseQuestions(raw);
+          if (qs.length === 0) sinInterpretar++;
           todasLasPreguntas = todasLasPreguntas.concat(qs);
-        } catch {
-          // Si un trozo falla, continuar con el siguiente
+        } catch (e) {
+          erroresApi++;
+          ultimoError = e;
         }
       }
 
-      if (todasLasPreguntas.length === 0) throw new Error("No se generaron preguntas. Prueba con otro archivo.");
+      // Distingue entre "la API falló" y "la API respondió pero no se entendió",
+      // que son problemas muy distintos y antes daban el mismo mensaje inútil.
+      if (todasLasPreguntas.length === 0) {
+        if (erroresApi > 0) {
+          throw new Error(`fallaron ${erroresApi} de ${trozos.length} llamadas a la IA (${ultimoError?.message || "sin detalle"})`);
+        }
+        throw new Error(`la IA respondió en las ${sinInterpretar} partes, pero no se pudo interpretar el formato de las preguntas`);
+      }
       setQuestions(todasLasPreguntas);
       setAnswers({});
       setShowExp({});
