@@ -55,7 +55,8 @@ export default async (req) => {
   }
 };
 
+// El límite de ejecución síncrona de Netlify es de 60 s y no es configurable,
+// así que no se declara maxDuration (esa opción no existe y se ignoraba).
 export const config = {
   path: "/.netlify/functions/claude",
-  maxDuration: 26,
 };
