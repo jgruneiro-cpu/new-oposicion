@@ -405,6 +405,85 @@ REGLAS ESTRICTAS:
 - Devuelve SOLO el array JSON sin backticks ni texto extra:
 [{"question":"...","type":"CDU|MARC21|Catalogacion|Servicios|Legislacion","options":["A","B","C","D"],"correct":0,"explanation":"..."}]`;
 
+// Para exámenes que YA traen preguntas numeradas: no se inventa nada, se convierten
+// las que hay. Una pregunta de entrada = una pregunta de salida.
+const PROMPT_CONVERTIR = `Eres un experto en oposiciones de Auxiliares de Archivos, Bibliotecas y Museos de la Comunidad de Madrid.
+A continuacion tienes preguntas de un examen real, con su numeracion original.
+Convierte CADA UNA en formato test. No inventes preguntas nuevas ni omitas ninguna.
+REGLAS ESTRICTAS:
+- Devuelve exactamente una entrada por cada pregunta recibida, en el mismo orden
+- Respeta el enunciado original; si ya trae opciones, conservalas TAL CUAL y en el mismo orden
+- Si no trae opciones, crea 4 plausibles de maximo 15 palabras
+- MUY IMPORTANTE: si la pregunta indica cual es la respuesta correcta
+  (por ejemplo "Respuesta correcta: B"), usa ESA y solo esa. Es la respuesta
+  oficial del examen. No la revises ni la corrijas aunque no estes de acuerdo.
+- correct: indice 0-3 de esa opcion (A=0, B=1, C=2, D=3)
+- No incluyas la marca de respuesta correcta dentro del enunciado ni de las opciones
+- explanation: 1 frase corta que explique POR QUE es correcta
+- Devuelve SOLO el array JSON sin backticks ni texto extra:
+[{"question":"...","type":"CDU|MARC21|Catalogacion|Servicios|Legislacion","options":["A","B","C","D"],"correct":0,"explanation":"..."}]`;
+
+const POR_LOTE     = 8;  // preguntas por llamada (~2.000 tokens de respuesta, ~25 s)
+const CONCURRENCIA = 4;  // llamadas simultaneas
+
+// Localiza las preguntas numeradas ("1.", "2)", "13.") al principio de linea y
+// devuelve un bloque de texto por pregunta. Devuelve null si el documento no
+// parece un examen numerado (un tema, unos apuntes), para caer al modo por extension.
+//
+// Esto sustituye al troceado por caracteres, que partia preguntas por la mitad y
+// —peor— hacia que el NUMERO de preguntas dependiera de lo que ocupaba el archivo
+// en vez de cuantas preguntas tenia dentro.
+function dividirEnPreguntas(texto) {
+  const re = /^[ \t]*(\d{1,3})[.)]\s+/gm;
+  const marcas = [];
+  let m;
+  while ((m = re.exec(texto)) !== null) marcas.push({ n: Number(m[1]), i: m.index });
+  if (marcas.length < 5) return null;
+
+  // Nos quedamos solo con la numeracion que avanza (1, 2, 3...), para no confundir
+  // con listas internas de opciones o con anios sueltos dentro del texto.
+  const secuencia = [];
+  let esperado = null;
+  for (const mk of marcas) {
+    if (esperado === null || mk.n === esperado + 1) { secuencia.push(mk); esperado = mk.n; }
+  }
+  if (secuencia.length < 5) return null;
+
+  const bloques = [];
+  for (let k = 0; k < secuencia.length; k++) {
+    const fin = k + 1 < secuencia.length ? secuencia[k + 1].i : texto.length;
+    const t = texto.slice(secuencia[k].i, fin).trim();
+    if (t.length > 30) bloques.push(t);
+  }
+  return bloques.length >= 5 ? bloques : null;
+}
+
+function agrupar(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+// Ejecuta las tareas con un maximo de N a la vez e informa del avance.
+// Secuencial, un examen de 100 preguntas tardaria ~5 min; de cuatro en cuatro, ~1,5.
+async function conLimite(tareas, limite, onAvance) {
+  const res = new Array(tareas.length);
+  let siguiente = 0, terminadas = 0;
+  async function worker() {
+    for (;;) {
+      const i = siguiente++;
+      if (i >= tareas.length) return;
+      try { res[i] = { ok: await tareas[i]() }; }
+      catch (e) { res[i] = { error: e }; }
+      onAvance(++terminadas, tareas.length);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limite, tareas.length) }, worker)
+  );
+  return res;
+}
+
 function ExamenATest() {
   const [phase, setPhase] = useState("idle");
   const [fileName, setFileName] = useState("");
@@ -415,6 +494,7 @@ function ExamenATest() {
   const [answers, setAnswers] = useState({});
   const [showExp, setShowExp] = useState({});
   const [error, setError] = useState("");
+  const [aviso, setAviso] = useState("");   // p.ej. "60 preguntas detectadas, 56 generadas"
   const fileRef = useRef();
 
   // ── Repositorio de examenes (localStorage) ──────────────────────────────
@@ -519,6 +599,8 @@ function ExamenATest() {
   }, [loadFile]);
 
   const [genProgress, setGenProgress] = useState("");
+  const [genPct, setGenPct] = useState(0);       // 0-100, para la barra real
+  const [genDetalle, setGenDetalle] = useState("");
 
   // Divide el texto en N trozos iguales
   function chunkText(text, n) {
@@ -551,39 +633,75 @@ function ExamenATest() {
   const generate = useCallback(async () => {
     if (!fileData) return;
     setPhase("generating");
+    setGenPct(0);
+    setGenDetalle("");
     setGenProgress("Analizando el examen...");
     try {
       const texto = fileData.data;
-      const TROZO = 3000; // chars por trozo
-      const NUM_TROZOS = Math.min(13, Math.ceil(texto.length / TROZO));
-      const trozos = chunkText(texto, NUM_TROZOS);
+      const bloques = dividirEnPreguntas(texto);
 
-      let todasLasPreguntas = [];
-      let erroresApi = 0;       // la llamada falló
-      let sinInterpretar = 0;   // la IA respondió pero no salió ninguna pregunta válida
-      let ultimoError = null;
+      let tareas, esperadas, modo, anuladas = 0;
 
-      for (let i = 0; i < trozos.length; i++) {
-        setGenProgress(`Generando preguntas (parte ${i + 1} de ${trozos.length})...`);
-        try {
-          const raw = await askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + trozos[i], 2000);
-          const qs = parseQuestions(raw);
-          if (qs.length === 0) sinInterpretar++;
-          todasLasPreguntas = todasLasPreguntas.concat(qs);
-        } catch (e) {
-          erroresApi++;
-          ultimoError = e;
-        }
+      if (bloques) {
+        // MODO EXAMEN — el documento ya trae preguntas numeradas: se convierten TODAS.
+        // El numero de preguntas lo marca el examen, no la longitud del archivo.
+        modo = "examen";
+        // Las anuladas en el examen oficial no se estudian: fuera antes de gastar llamadas.
+        const utiles = bloques.filter(b => !/ANULADA/i.test(b));
+        anuladas = bloques.length - utiles.length;
+        esperadas = utiles.length;
+        const lotes = agrupar(utiles, POR_LOTE);
+        setGenProgress(`Detectadas ${bloques.length} preguntas en el examen`);
+        setGenDetalle(
+          anuladas > 0
+            ? `Descartadas ${anuladas} anuladas. Convirtiendo ${esperadas} en ${lotes.length} tandas...`
+            : `Convirtiendolas en ${lotes.length} tandas...`
+        );
+        tareas = lotes.map(lote => () =>
+          askClaude(PROMPT_CONVERTIR + "\n\nPREGUNTAS:\n" + lote.join("\n\n"), 4000)
+            .then(parseQuestions)
+        );
+      } else {
+        // MODO TEMARIO — no hay preguntas numeradas (un tema, apuntes): se generan
+        // segun la extension, como antes, pero ya sin el tope de 13 trozos.
+        modo = "temario";
+        const trozos = chunkText(texto, Math.max(1, Math.ceil(texto.length / 3000)));
+        esperadas = trozos.length * 5;
+        setGenProgress("El documento no trae preguntas numeradas");
+        setGenDetalle(`Generando preguntas sobre su contenido (${trozos.length} partes)...`);
+        tareas = trozos.map(t => () =>
+          askClaude(PROMPT_EXAMEN + "\n\nEXAMEN:\n" + t, 2000).then(parseQuestions)
+        );
       }
+
+      const resultados = await conLimite(tareas, CONCURRENCIA, (hechas, total) => {
+        setGenPct(Math.round((hechas / total) * 100));
+        setGenProgress(`Preparando tu test... ${Math.round((hechas / total) * esperadas)} de ${esperadas} preguntas`);
+        setGenDetalle(`Tanda ${hechas} de ${total}`);
+      });
+
+      const todasLasPreguntas = resultados.flatMap(r => r.ok || []);
+      const erroresApi = resultados.filter(r => r.error).length;
+      const sinInterpretar = resultados.filter(r => r.ok && r.ok.length === 0).length;
 
       // Distingue entre "la API falló" y "la API respondió pero no se entendió",
       // que son problemas muy distintos y antes daban el mismo mensaje inútil.
       if (todasLasPreguntas.length === 0) {
         if (erroresApi > 0) {
-          throw new Error(`fallaron ${erroresApi} de ${trozos.length} llamadas a la IA (${ultimoError?.message || "sin detalle"})`);
+          throw new Error(`fallaron ${erroresApi} de ${tareas.length} llamadas a la IA (${resultados.find(r => r.error)?.error?.message || "sin detalle"})`);
         }
-        throw new Error(`la IA respondió en las ${sinInterpretar} partes, pero no se pudo interpretar el formato de las preguntas`);
+        throw new Error(`la IA respondió en las ${sinInterpretar} tandas, pero no se pudo interpretar el formato de las preguntas`);
       }
+
+      // Si alguna tanda se cayo, seguimos con lo que haya pero se lo decimos al alumno,
+      // en vez de dejarle creer que el examen tenia menos preguntas de las que tiene.
+      const notas = [];
+      if (anuladas > 0) notas.push(`Se han descartado ${anuladas} pregunta${anuladas > 1 ? "s" : ""} anulada${anuladas > 1 ? "s" : ""} en el examen oficial.`);
+      if (modo === "examen" && todasLasPreguntas.length < esperadas) {
+        notas.push(`Se han generado ${todasLasPreguntas.length} de ${esperadas}.${erroresApi > 0 ? " Alguna tanda falló; puedes volver a intentarlo." : ""}`);
+      }
+      setAviso(notas.join(" "));
+
       setQuestions(todasLasPreguntas);
       setAnswers({});
       setShowExp({});
@@ -614,7 +732,8 @@ function ExamenATest() {
 
   const reset = () => {
     setPhase("idle"); setFileName(""); setFileData(null);
-    setQuestions([]); setAnswers({}); setShowExp({}); setError(""); setCurrent(0);
+    setQuestions([]); setAnswers({}); setShowExp({}); setError(""); setAviso(""); setCurrent(0);
+    setGenPct(0); setGenProgress(""); setGenDetalle("");
   };
 
   return (
@@ -727,10 +846,24 @@ function ExamenATest() {
         <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"60px 32px", textAlign:"center" }}>
           <div style={{ fontSize:44, marginBottom:18 }}>⚙️</div>
           <h2 style={{ fontSize:20, fontWeight:600, color:"var(--color-text)", margin:"0 0 10px" }}>{genProgress || "Analizando el examen..."}</h2>
-          <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:"0 0 24px" }}>Esto puede tardar unos segundos por cada parte.</p>
+          <p style={{ fontSize:13, color:"var(--color-text-soft)", margin:"0 0 24px" }}>
+            {genDetalle || "Un examen largo puede tardar un par de minutos. No cierres esta pagina."}
+          </p>
+          {/* Barra de progreso real: mientras no hay avance medible, late; en cuanto
+              empiezan a llegar tandas, avanza segun el porcentaje de verdad. */}
           <div style={{ background:"var(--color-bg-soft)", borderRadius:6, height:6, overflow:"hidden" }}>
-            <div style={{ height:"100%", background:"var(--color-accent)", borderRadius:6, animation:"pulse 1.5s ease-in-out infinite" }} />
+            <div style={{
+              height:"100%",
+              background:"var(--color-accent)",
+              borderRadius:6,
+              width: genPct > 0 ? `${genPct}%` : "100%",
+              transition: "width .4s ease",
+              animation: genPct > 0 ? "none" : "pulse 1.5s ease-in-out infinite"
+            }} />
           </div>
+          {genPct > 0 && (
+            <p style={{ fontSize:12, color:"var(--color-text-mute)", margin:"10px 0 0" }}>{genPct}%</p>
+          )}
         </div>
       )}
 
@@ -738,6 +871,11 @@ function ExamenATest() {
         const q = questions[current];
         return (
           <>
+            {aviso && (
+              <div style={{ background:"var(--color-bg-soft)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"12px 16px", marginBottom:14, fontSize:13, color:"var(--color-text-soft)" }}>
+                ⚠️ {aviso}
+              </div>
+            )}
             <div style={{ background:"var(--color-bg)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-lg)", padding:"14px 20px", marginBottom:14 }}>
               <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, color:"var(--color-text-soft)", marginBottom:8 }}>
                 <span>Pregunta <strong>{current+1}</strong> de <strong>{questions.length}</strong></span>
